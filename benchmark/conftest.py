@@ -5,6 +5,7 @@ import os
 import pytest
 import torch
 import yaml
+import yaml
 
 import flag_gems
 from flag_gems.runtime import torch_device_fn
@@ -77,6 +78,10 @@ class BenchConfig:
         self.shape_file = os.path.join(os.path.dirname(__file__), "core_shapes.yaml")
         self.query = False
         self.parallel = 0
+
+
+Config = BenchConfig()
+REGISTERED_MARKS = []
 
 
 def pytest_addoption(parser):
@@ -188,24 +193,16 @@ def pytest_addoption(parser):
         ),
     )
 
-    try:
-        parser.addoption(
-            "--collect-marks",
-            action="store_true",
-            help="Collect the tests with marker information without executing them",
-        )
-    except ValueError:
-        # Mixed test+benchmark pytest runs may already register this option in
-        # tests/conftest.py. Reuse the existing option in that case.
-        pass
+    parser.addoption(
+        "--collect-markers",
+        action="store_true",
+        help="Collect the tests with marker information without executing them",
+    )
 
 
 def pytest_configure(config):
     global Config  # noqa: F824
-    global REPORT_FILE
     global REGISTERED_MARKS
-
-    Config = BenchConfig()
 
     REGISTERED_MARKS = {
         marker.split(":")[0].strip() for marker in config.getini("markers")
@@ -319,100 +316,31 @@ def extract_and_log_op_attributes(request):
         emit_record_logger(json.dumps(op_attributes, indent=2))
 
 
-def get_reason(report):
-    """Get reason for skipped or failed test."""
-
-    if hasattr(report.longrepr, "reprcrash"):
-        return report.longrepr.reprcrash.message
-
-    if isinstance(report.longrepr, tuple):
-        return report.longrepr[2]
-
-    return str(report.longrepr)
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    out = yield
-    report = out.get_result()
-    all_marks = [mark.name for mark in item.iter_markers()]
-    # exclude builtin marks
-    marks = [mark for mark in all_marks if mark not in BUILTIN_MARKS]
-    # Assume the first mark is the operator's ID
-    opid = marks[0] if marks else item.nodeid
-    # Set the operator ID for the next function to use
-    report.opid = opid
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_runtest_logreport(report):
-    if not Config.record_json:
-        return
-
-    op = report.opid
-    TEST_RESULTS.setdefault(op, {})
-
-    if report.when == "setup":
-        if report.outcome == "skipped":
-            reason = get_reason(report)
-            TEST_RESULTS[op]["result"] = "skipped"
-            TEST_RESULTS[op]["reason"] = reason
-            TEST_RESULTS[op]["test_case"] = report.nodeid
-
-    elif report.when == "call":
-        TEST_RESULTS[op]["result"] = report.outcome
-        TEST_RESULTS[op]["test_case"] = report.nodeid
-
-        if report.outcome in ["skipped", "failed"]:
-            reason = get_reason(report)
-            TEST_RESULTS[op]["reason"] = reason
-        else:
-            TEST_RESULTS[op]["reason"] = None
-
-
-def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    """Combine and dump the result into JSON."""
-    if not Config.record_json:
-        return
-
-    data = TEST_RESULTS
-    if os.path.exists(REPORT_FILE):
-        with open(REPORT_FILE, "r") as f:
-            existing_data = json.load(f)
-        existing_data.update(TEST_RESULTS)
-        data = existing_data
-
-    with open(REPORT_FILE, "w") as f:
-        json.dump(data, f, indent=2, default=str)
-
-
 def pytest_collection_modifyitems(session, config, items):
-    if not config.getoption("--collect-marks"):
-        return
+    if config.getoption("--collect-markers"):
+        report = []
+        for item in items:
+            data = {}
 
-    report = []
-    for item in items:
-        data = {}
+            # Collect some general information
+            if item.cls:
+                data["class"] = item.cls.__name__
+            data["test_case"] = item.name
+            if item.originalname:
+                data["function"] = item.originalname
+            data["file"] = item.location[0]
 
-        # Collect some general information
-        if item.cls:
-            data["class"] = item.cls.__name__
-        data["test_case"] = item.name
-        if item.originalname:
-            data["function"] = item.originalname
-        data["file"] = item.location[0]
+            all_marks = list(item.iter_markers())
+            op_marks = [
+                mark.name
+                for mark in all_marks
+                if mark.name not in BUILTIN_MARKS and mark.name not in REGISTERED_MARKS
+            ]
 
-        all_marks = list(item.iter_markers())
-        op_marks = [
-            mark.name
-            for mark in all_marks
-            if mark.name not in BUILTIN_MARKS and mark.name not in REGISTERED_MARKS
-        ]
+            data["marks"] = op_marks
+            report.append(data)
 
-        data["marks"] = op_marks
-        report.append(data)
+        print(yaml.dump(report, indent=2))
 
-    print(yaml.dump(report, indent=2))
-
-    # Skip all tests
-    items.clear()
+        # Skip all tests
+        items.clear()
