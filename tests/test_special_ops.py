@@ -2554,8 +2554,12 @@ def test_accuracy_margin_ranking_loss(shape, dtype, margin, reduction):
 @pytest.mark.parametrize("margin", [0.0, 0.5, 1.0])
 @pytest.mark.parametrize("reduction", ["none", "mean", "sum"])
 def test_accuracy_margin_ranking_loss_backward(shape, dtype, margin, reduction):
-    input1 = torch.randn(shape, dtype=dtype, device=flag_gems.device, requires_grad=True)
-    input2 = torch.randn(shape, dtype=dtype, device=flag_gems.device, requires_grad=True)
+    input1 = torch.randn(
+        shape, dtype=dtype, device=flag_gems.device, requires_grad=True
+    )
+    input2 = torch.randn(
+        shape, dtype=dtype, device=flag_gems.device, requires_grad=True
+    )
     target = (
         torch.randint(0, 2, shape, device=flag_gems.device, dtype=torch.int8) * 2 - 1
     ).to(dtype)
