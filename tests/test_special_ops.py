@@ -2548,6 +2548,53 @@ def test_accuracy_margin_ranking_loss(shape, dtype, margin, reduction):
     gems_assert_close(res_out, ref_out, dtype)
 
 
+@pytest.mark.margin_ranking_loss
+@pytest.mark.parametrize("shape", [(2, 3), (128, 256), (1024, 256)])
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+@pytest.mark.parametrize("margin", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("reduction", [0, 1, 2])
+def test_accuracy_margin_ranking_loss_backward(shape, dtype, margin, reduction):
+    input1 = torch.randn(
+        shape, dtype=dtype, device=flag_gems.device, requires_grad=True
+    )
+    input2 = torch.randn(
+        shape, dtype=dtype, device=flag_gems.device, requires_grad=True
+    )
+    target = (
+        torch.randint(0, 2, shape, device=flag_gems.device, dtype=torch.int8) * 2 - 1
+    ).to(dtype)
+
+    ref_input1 = to_reference(input1).detach().requires_grad_(True)
+    ref_input2 = to_reference(input2).detach().requires_grad_(True)
+    ref_target = to_reference(target)
+
+    ref_out = torch.ops.aten.margin_ranking_loss(
+        ref_input1, ref_input2, ref_target, margin, reduction
+    )
+
+    with flag_gems.use_gems():
+        res_out = torch.ops.aten.margin_ranking_loss(
+            input1, input2, target, margin, reduction
+        )
+
+    # Create gradient for backward pass
+    if reduction == 0:  # 'none'
+        out_grad = torch.randn_like(res_out)
+        ref_out_grad = to_reference(out_grad)
+    else:
+        out_grad = torch.randn((), dtype=dtype, device=flag_gems.device)
+        ref_out_grad = to_reference(out_grad)
+
+    # Backward pass
+    ref_out.backward(ref_out_grad)
+    with flag_gems.use_gems():
+        res_out.backward(out_grad)
+
+    # Check gradients (use reduce_dim=2 to account for boundary effects at max(0, val))
+    gems_assert_close(input1.grad, ref_input1.grad, dtype, reduce_dim=2)
+    gems_assert_close(input2.grad, ref_input2.grad, dtype, reduce_dim=2)
+
+
 @pytest.mark.soft_margin_loss
 @pytest.mark.parametrize("shape", [(2, 3), (128, 256), (512, 512)])
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
