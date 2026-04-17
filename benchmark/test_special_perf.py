@@ -1412,18 +1412,14 @@ def test_perf_margin_ranking_loss():
 @pytest.mark.margin_ranking_loss
 def test_perf_margin_ranking_loss_backward():
     def margin_ranking_loss_backward_input_fn(shape, dtype, device):
-        # 生成需要梯度的输入
         inp1 = torch.randn(shape, dtype=dtype, device=device, requires_grad=True)
         inp2 = torch.randn(shape, dtype=dtype, device=device, requires_grad=True)
 
-        # 生成 target (±1)，确保不需要梯度
         target = 2 * torch.randint(0, 2, shape, device=device, dtype=dtype) - 1
-        target = target.detach()  # 分离出计算图
+        target = target.detach()
 
-        # 使用字符串 reduction 更清晰
         yield inp1, inp2, target, 0.5, "mean"
 
-        # 清理梯度避免影响下次迭代
         if inp1.grad is not None:
             inp1.grad = None
         if inp2.grad is not None:
