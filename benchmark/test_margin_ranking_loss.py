@@ -24,7 +24,7 @@ def _backward_input_fn(shape, dtype, device):
 
 @pytest.mark.margin_ranking_loss
 def test_margin_ranking_loss():
-    bench = base.GenericBenchmark(
+    bench = base.MarginRankingLossBenchmark(
         op_name="margin_ranking_loss",
         input_fn=_input_fn,
         torch_op=torch.ops.aten.margin_ranking_loss,
@@ -35,7 +35,7 @@ def test_margin_ranking_loss():
 
 @pytest.mark.margin_ranking_loss_backward
 def test_margin_ranking_loss_backward():
-    bench = base.GenericBenchmark(
+    bench = base.MarginRankingLossBenchmark(
         op_name="margin_ranking_loss",
         input_fn=_backward_input_fn,
         torch_op=torch.ops.aten.margin_ranking_loss,
