@@ -8,7 +8,7 @@ import triton.language as tl
 
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry
-from flag_gems.utils import triton_lang_extension as tle
+from flag_gems.utils import triton_lang_extension as ext
 from flag_gems.utils.limits import get_dtype_min
 
 Tensor = torch.Tensor
@@ -19,7 +19,7 @@ logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
 @triton.jit
 def tl_cummax(input, index, axis=0):
     return tl.associative_scan(
-        (input, index), axis, tle.maximum_with_index_tie_break_right
+        (input, index), axis, ext.maximum_with_index_tie_break_right
     )
 
 
@@ -28,7 +28,7 @@ def tl_max_tie_break_right(input, index, axis=None, keep_dims=False):
     return tl.reduce(
         (input, index),
         axis,
-        tle.maximum_with_index_tie_break_right,
+        ext.maximum_with_index_tie_break_right,
         keep_dims=keep_dims,
     )
 
@@ -43,7 +43,7 @@ def add_base_max_kernel(
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tle.program_id(0)
+    pid = ext.program_id(0)
     offset = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offset < n_elements
 
@@ -80,14 +80,13 @@ def scan_part_max_kernel(
     NEED_PARTIAL: tl.constexpr,
     USE_OUT_INDICES: tl.constexpr,
 ):
-    pid = tle.program_id(0)
+    pid = ext.program_id(0)
     offset = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offset < n_elements
 
     min_value = get_dtype_min(inp.type.element_ty)
     inp_ptrs = inp + offset
     inp_vals = tl.load(inp_ptrs, mask=mask, other=min_value)
-    # inp_vals = tl.where(mask, inp_vals, min_value)
     if (
         tl.constexpr(inp_vals.dtype.is_int64())
         or tl.constexpr(inp_vals.dtype.is_uint64())
@@ -102,10 +101,7 @@ def scan_part_max_kernel(
         in_indices_vals = tl.load(in_indices_ptrs, mask=mask)
     else:
         in_indices_vals = offset
-    # tl.device_print("inp_vals", inp_vals)
-    # tl.device_print("in_indices_vals", in_indices_vals)
     result, cummax_indices = tl_cummax(inp_vals, in_indices_vals, axis=0)
-    # tl.device_print("result", result)
 
     if tl.constexpr(NEED_PARTIAL):
         # tl.max do not support max_indices_tie_break_right
@@ -133,8 +129,6 @@ def scan_then_fan_col(inp, out, out_indices, n_ele, dtype, use_out_indices=False
     if n_ele <= 1024 * 4:
         BLOCK_SIZE = triton.next_power_of_2(n_ele)
     part_num = math.ceil(n_ele / BLOCK_SIZE)
-    # import builtins
-    # BLOCK_SIZE = builtins.max(BLOCK_SIZE, 64)
     need_partial = True if part_num >= 2 else False
     if need_partial:
         partial_max = torch.empty(part_num, dtype=dtype, device=inp.device)
@@ -147,12 +141,6 @@ def scan_then_fan_col(inp, out, out_indices, n_ele, dtype, use_out_indices=False
 
     grid = (part_num,)
     with torch_device_fn.device(inp.device):
-        # print(f'inp = {inp.cpu()}')
-        # print(f'BLOCK_SIZE = {BLOCK_SIZE}')
-        # print(f'use_out_indices = {use_out_indices}')
-        # import os
-        # os.environ["TRITONXPU_OTHER_SIM"] = "1"
-        # os.environ["TRITONXPU_STORE_MASK_SIM"] = "1"
         scan_part_max_kernel[grid](
             inp,
             out,
@@ -165,11 +153,6 @@ def scan_then_fan_col(inp, out, out_indices, n_ele, dtype, use_out_indices=False
             need_partial,
             use_out_indices,
         )
-        # if "TRITONXPU_OTHER_SIM" in os.environ:
-        #     del os.environ["TRITONXPU_OTHER_SIM"]
-        # if "TRITONXPU_STORE_MASK_SIM" in os.environ:
-        #     del os.environ["TRITONXPU_STORE_MASK_SIM"]
-        # print(f'out = {out.cpu()}')
 
     if part_num >= 2:
         scan_then_fan_col(
@@ -202,9 +185,9 @@ def scan_part_max_abc_kernel(
     NEED_PARTIAL: tl.constexpr,
     USE_OUT_INDICES: tl.constexpr,
 ):
-    pid_a = tle.program_id(0)
-    pid_b = tle.program_id(1)
-    pid_c = tle.program_id(2)
+    pid_a = ext.program_id(0)
+    pid_b = ext.program_id(1)
+    pid_c = ext.program_id(2)
 
     a_idx = pid_a
     b_idx = pid_b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -266,9 +249,9 @@ def add_base_max_abc_kernel(
     part_num,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid_a = tle.program_id(0)
-    pid_b = tle.program_id(1)
-    pid_c = tle.program_id(2)
+    pid_a = ext.program_id(0)
+    pid_b = ext.program_id(1)
+    pid_c = ext.program_id(2)
 
     a_idx = pid_a
     b_idx = pid_b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -367,17 +350,28 @@ def scan_part_max_abc_loop_kernel(
     loop_num,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid_a = tle.program_id(0)
-    pid_c = tle.program_id(1)
+    pid_a = ext.program_id(0)
+    pid_c = ext.program_id(1)
 
     a_idx = pid_a
     c_idx = pid_c
     t_idx = tl.arange(0, BLOCK_SIZE)
     ac_offset = a_idx * B * C + c_idx
 
-    # init
+    # init, promote low precision types
     min_value = get_dtype_min(inp.type.element_ty)
-    prev_max_val = tl.full([], min_value, dtype=tl.float32)
+    if tl.constexpr(inp.type.element_ty.is_fp16()) or tl.constexpr(
+        inp.type.element_ty.is_bf16()
+    ):
+        compute_dtype = tl.float32
+    elif tl.constexpr(inp.type.element_ty.is_int8()) or tl.constexpr(
+        inp.type.element_ty.is_int16()
+    ):
+        compute_dtype = tl.int32
+    else:
+        compute_dtype = inp.type.element_ty
+
+    prev_max_val = tl.full([], min_value, dtype=compute_dtype)
     prev_max_val_idx = tl.full([], 0, dtype=tl.int64)
     last_mask = t_idx == (BLOCK_SIZE - 1)
 
@@ -387,15 +381,11 @@ def scan_part_max_abc_loop_kernel(
         offset = ac_offset + b_idx * C
 
         inp_vals = tl.load(inp + offset, mask=mask, other=min_value)
-        if (
-            tl.constexpr(inp_vals.dtype.is_int64())
-            or tl.constexpr(inp_vals.dtype.is_uint64())
-        ) or tl.constexpr(inp_vals.dtype.is_fp64()):
-            vals = inp_vals
-        elif tl.constexpr(inp_vals.dtype.is_int()):
-            vals = inp_vals.to(tl.int32)
+        # Only promote if necessary
+        if tl.constexpr(compute_dtype != inp.type.element_ty):
+            vals = inp_vals.to(compute_dtype)
         else:
-            vals = inp_vals.to(tl.float32)
+            vals = inp_vals
         idxs = b_idx
 
         # cummax
@@ -405,19 +395,28 @@ def scan_part_max_abc_loop_kernel(
         prev_max_val_b = tl.broadcast_to(prev_max_val, (BLOCK_SIZE,))
         prev_max_val_idx_b = tl.broadcast_to(prev_max_val_idx, (BLOCK_SIZE,))
 
-        # update result from prev val and idx
-        cummax_indices = tl.where(
-            result >= prev_max_val_b, cummax_indices, prev_max_val_idx_b
-        )
-        result = tl.maximum(result, prev_max_val_b)
+        # Handle NaN and tie-breaking logic
+        if tl.constexpr(compute_dtype.is_floating()):
+            # For floats: handle NaN propagation + tie-break right
+            prev_is_nan = prev_max_val != prev_max_val
+            result_is_nan = result != result
+            prev_nan_mask = tl.broadcast_to(prev_is_nan, (BLOCK_SIZE,))
+
+            use_result = result_is_nan | (~prev_nan_mask & (result >= prev_max_val_b))
+        else:
+            # For integers: simple tie-break right
+            use_result = result >= prev_max_val_b
+
+        final_vals = tl.where(use_result, result, prev_max_val_b)
+        final_indices = tl.where(use_result, cummax_indices, prev_max_val_idx_b)
 
         # update global max val and idx
-        prev_max_val = tl.sum(tl.where(last_mask, result, 0.0), axis=0)
-        prev_max_val_idx = tl.sum(tl.where(last_mask, cummax_indices, 0), axis=0)
+        prev_max_val = tl.sum(tl.where(last_mask, final_vals, 0), axis=0)
+        prev_max_val_idx = tl.sum(tl.where(last_mask, final_indices, 0), axis=0)
 
         # store result
-        tl.store(out + offset, result, mask=mask)
-        tl.store(out_indices + offset, cummax_indices, mask=mask)
+        tl.store(out + offset, final_vals.to(out.type.element_ty), mask=mask)
+        tl.store(out_indices + offset, final_indices, mask=mask)
 
 
 def scan_then_fan_loop(inp, out, out_indices, A, B, C, dtype):
@@ -437,6 +436,7 @@ def scan_then_fan_loop(inp, out, out_indices, A, B, C, dtype):
             C,
             loop_num,
             BLOCK_SIZE,
+            is_use_mask_zero=True,
         )
 
 

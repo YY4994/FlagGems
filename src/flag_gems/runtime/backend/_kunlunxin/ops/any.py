@@ -7,7 +7,7 @@ import triton.language as tl
 from flag_gems.ops.max import max_kernel_1, max_kernel_2
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import dim_compress, libentry
-from flag_gems.utils import triton_lang_extension as tle
+from flag_gems.utils import triton_lang_extension as ext
 
 logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
 # torch.any: Tests if any elements in input evaluate to True. If the dtype of input
@@ -60,7 +60,7 @@ def any_kernel_dim(
     BLOCK_N: tl.constexpr,
 ):
     # Map the program id to the row of inp it should compute.
-    pid = tle.program_id(0)
+    pid = ext.program_id(0)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
     inp = inp + rows * N
     out = out + rows
@@ -120,7 +120,7 @@ def any_kernel_1(
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tle.program_id(0)
+    pid = ext.program_id(0)
     offset = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     inp_ptrs = inp + offset
     mask = offset < n_elements
@@ -144,29 +144,29 @@ def any_kernel_2(mid, out, MID_SIZE, BLOCK_MID: tl.constexpr):
 def any(inp):
     logger.debug("GEMS ANY")
     n_elements = inp.numel()
-    block_size = min(
+    block_size = max(
         triton.cdiv(get_block(n_elements), cluster_num),
         triton.cdiv(buf_len_per_core * core_num, 4),
     )
+
     mid_size = triton.cdiv(n_elements, block_size)
     block_mid = triton.next_power_of_2(mid_size)
 
     if n_elements >= vector_size * thread_num:
-        # according to api, op == any, use max to calculate
-        inpf = inp.to(torch.float)
-        midf = torch.empty((mid_size,), dtype=torch.float, device=inp.device)
-        outf = torch.empty([], dtype=torch.float, device=inp.device)
+        inp_uint8 = inp.view(torch.uint8)
+
+        mid = torch.empty((mid_size,), dtype=torch.uint8, device=inp.device)
+        out = torch.empty([], dtype=torch.uint8, device=inp.device)
 
         with torch_device_fn.device(inp.device):
             max_kernel_1[(mid_size, 1)](
-                inpf, midf, n_elements, block_size, buffer_size_limit=2048
+                inp_uint8, mid, n_elements, block_size, buffer_size_limit=2048
             )
             if mid_size == 1:
-                return midf.to(torch.bool).reshape([])
-            max_kernel_2[(1, 1)](
-                midf, outf, mid_size, block_mid, buffer_size_limit=2048
-            )
-        out = outf.to(torch.bool)
+                return mid.view(torch.bool).reshape([])
+
+            max_kernel_2[(1, 1)](mid, out, mid_size, block_mid, buffer_size_limit=2048)
+        out = out.view(torch.bool)
     else:
         mid = torch.empty((mid_size,), dtype=torch.bool, device=inp.device)
         out = torch.empty([], dtype=torch.bool, device=inp.device)

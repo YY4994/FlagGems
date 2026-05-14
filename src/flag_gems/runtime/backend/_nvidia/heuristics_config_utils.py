@@ -1,6 +1,10 @@
 import torch
 import triton
 
+_MIN_TILE_N = 64
+_MAX_TILE_N_PER_ROW = 4096
+_MAX_ONE_TILE_N = 2048
+
 
 def simple_elementwise_blocksize_heur(args):
     return 1024
@@ -291,6 +295,14 @@ def var_mean_heur_block_n(args):
     return triton.next_power_of_2(args["BLOCK_NUM"])
 
 
+def upsample_nearest1d_SAME_L(args):
+    return args["OL"] == args["IL"]
+
+
+def upsample_nearest1d_USE_INT32_IDX(args):
+    return args["N"] * args["C"] * args["OL"] <= (2**31 - 1)  # INT32 MAX
+
+
 def upsample_nearest2d_SAME_H(args):
     return args["OH"] == args["IH"]
 
@@ -301,6 +313,22 @@ def upsample_nearest2d_SAME_W(args):
 
 def upsample_nearest2d_USE_INT32_IDX(args):
     return args["N"] * args["C"] * args["OH"] * args["OW"] <= (2**31 - 1)  # INT32 MAX
+
+
+def upsample_nearest3d_SAME_D(args):
+    return args["OD"] == args["ID"]
+
+
+def upsample_nearest3d_SAME_H(args):
+    return args["OH"] == args["IH"]
+
+
+def upsample_nearest3d_SAME_W(args):
+    return args["OW"] == args["IW"]
+
+
+def upsample_nearest3d_USE_INT32_IDX(args):
+    return args["N"] * args["C"] * args["OD"] * args["OH"] * args["OW"] <= (2**31 - 1)
 
 
 def batch_norm_heur_block_m(args):
@@ -322,6 +350,47 @@ def vdot_heur_block_size(args):
         return 256
     else:
         return 1024
+
+
+def mean_heur_tile_k(args):
+    MAX_TILE_K = 512
+    MAX_GRID_Y = 65535
+    NUM_SMS = torch.cuda.get_device_properties(
+        torch.cuda.current_device()
+    ).multi_processor_count
+    tile_k = 1
+    upper_bound = min(args["K"], MAX_TILE_K)
+    max_tile_k_allowed_by_tile_n = max(1, _MAX_TILE_N_PER_ROW // _MIN_TILE_N)
+    upper_bound = min(upper_bound, max_tile_k_allowed_by_tile_n)
+    while tile_k <= upper_bound:
+        num_blocks = args["M"] * triton.cdiv(args["K"], tile_k)
+        num_waves = num_blocks / NUM_SMS
+        if (num_waves > 1) and (tile_k * 2 <= upper_bound):
+            tile_k *= 2
+        else:
+            break
+    # Ensure grid Y dimension does not exceed CUDA limit
+    min_tile_k = triton.cdiv(args["K"], MAX_GRID_Y)
+    if min_tile_k > tile_k:
+        tile_k = triton.next_power_of_2(min_tile_k)
+    return tile_k
+
+
+def mean_heur_tile_n_non_inner(args):
+    tile_k = args.get("TILE_K", 1)
+    limit_by_k = max(1, _MAX_TILE_N_PER_ROW // tile_k)
+    N = args.get("N", 1)
+    desired = min(max(N, _MIN_TILE_N), limit_by_k)
+    desired = min(desired, _MAX_ONE_TILE_N, limit_by_k)
+    tile_n = triton.next_power_of_2(desired)
+    if tile_n > limit_by_k:
+        tile_n = limit_by_k
+    tile_n = max(tile_n, _MIN_TILE_N)
+    return tile_n
+
+
+def mean_heur_one_tile_per_cta(args):
+    return args["TILE_N"] >= args["N"]
 
 
 HEURISTICS_CONFIGS = {
@@ -383,6 +452,12 @@ HEURISTICS_CONFIGS = {
         "ONE_TILE_PER_CTA": softmax_heur_one_tile_per_cta,
         "num_warps": softmax_heur_num_warps_non_inner,
     },
+    "mean_non_inner": {
+        "TILE_K": mean_heur_tile_k,
+        "TILE_N": mean_heur_tile_n_non_inner,
+        "ONE_TILE_PER_CTA": mean_heur_one_tile_per_cta,
+        "num_warps": softmax_heur_num_warps_non_inner,
+    },
     "softmax_inner": {
         "TILE_N": softmax_heur_tile_n_inner,
         "ONE_TILE_PER_CTA": softmax_heur_one_tile_per_cta,
@@ -400,10 +475,20 @@ HEURISTICS_CONFIGS = {
         "BLOCK": uniform_heur_block,
         "num_warps": uniform_heur_num_warps,
     },
+    "upsample_nearest1d": {
+        "SAME_L": upsample_nearest1d_SAME_L,
+        "USE_INT32_IDX": upsample_nearest1d_USE_INT32_IDX,
+    },
     "upsample_nearest2d": {
         "SAME_H": upsample_nearest2d_SAME_H,
         "SAME_W": upsample_nearest2d_SAME_W,
         "USE_INT32_IDX": upsample_nearest2d_USE_INT32_IDX,
+    },
+    "upsample_nearest3d": {
+        "SAME_D": upsample_nearest3d_SAME_D,
+        "SAME_H": upsample_nearest3d_SAME_H,
+        "SAME_W": upsample_nearest3d_SAME_W,
+        "USE_INT32_IDX": upsample_nearest3d_USE_INT32_IDX,
     },
     "var_mean": {
         "BLOCK_N": var_mean_heur_block_n,
