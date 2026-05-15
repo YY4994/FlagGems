@@ -14,5 +14,4 @@ def bitwise_right_shift_kernel(a, b):
 
 
 def bitwise_right_shift(self, other, *, out=None):
-    logger.debug("GEMS BITWISE_RIGHT_SHIFT")
     return bitwise_right_shift_kernel(self, other, out=out)

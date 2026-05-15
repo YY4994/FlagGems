@@ -1,5 +1,4 @@
 import logging
-import os
 
 import torch
 import triton
@@ -8,22 +7,16 @@ import triton.language as tl
 from .. import runtime
 from ..runtime import torch_device_fn
 from ..utils import libentry, libtuner
-from ..utils import triton_lang_extension as ext
+from ..utils import triton_lang_extension as tle
 from .bmm import bmm
 from .mul import mul
-
-logger = logging.getLogger(__name__)
 
 
 @libentry()
 @libtuner(
-    configs=runtime.ops_get_configs("baddbmm", pre_hook=None)
-    if os.environ.get("USE_FLAGTUNE") == "1"
-    else runtime.get_tuned_config("baddbmm"),
+    configs=runtime.get_tuned_config("baddbmm"),
     key=["M", "N", "K"],
-    strategy=runtime.get_expand_config("baddbmm")["strategy"]
-    if os.environ.get("USE_FLAGTUNE") == "1"
-    else ["align32", "align32", "align32"],
+    strategy=["align32", "align32", "align32"],
     warmup=5,
     rep=10,
 )
@@ -49,23 +42,22 @@ def baddbmm_kernel(
     bias_batch_stride: tl.constexpr,
     bias_M_stride: tl.constexpr,
     bias_N_stride: tl.constexpr,
-    IS_FP64: tl.constexpr = False,
 ):
     # batch offsets
-    pid_b = ext.program_id(2)
+    pid_b = tle.program_id(2)
     A += pid_b * M * K
     B += pid_b * K * N
     O += pid_b * M * N
     bias += pid_b * bias_batch_stride
 
-    pidx = ext.program_id(0)
-    pidy = ext.program_id(1)
+    pidx = tle.program_id(0)
+    pidy = tle.program_id(1)
 
     if GROUP_M == 1:
         pid_m, pid_n = pidx, pidy
     else:
-        gridx = ext.num_programs(0)
-        gridy = ext.num_programs(1)
+        gridx = tle.num_programs(0)
+        gridy = tle.num_programs(1)
         pid = pidx + pidy * gridx
         num_CTA_per_group = gridy * GROUP_M
         group_id = pid // num_CTA_per_group
@@ -90,10 +82,7 @@ def baddbmm_kernel(
     o_ptrs = O + offs_m[:, None] * N + offs_n[None, :]
 
     num_iters = tl.cdiv(K, TILE_K)
-    if IS_FP64:
-        accumulator = tl.zeros((TILE_M, TILE_N), dtype=tl.float64)
-    else:
-        accumulator = tl.zeros((TILE_M, TILE_N), dtype=tl.float32)
+    accumulator = tl.zeros((TILE_M, TILE_N), dtype=tl.float32)
     for _ in range(num_iters):
         if DIVISIBLE_K:
             if DIVISIBLE_M:
@@ -138,42 +127,10 @@ def baddbmm_kernel(
     tl.store(o_ptrs, o, mask=mask_c)
 
 
-def _baddbmm_launch(bias, A, B, beta, alpha, out):
-    batch, M, K = A.shape
-    _, _, N = B.shape
-    A = A.contiguous()
-    B = B.contiguous()
-    bbias = torch.broadcast_to(bias, (batch, M, N)).contiguous()
-    bias_batch_stride = bbias.stride(0)
-    bias_M_stride = bbias.stride(1)
-    bias_N_stride = bbias.stride(-1)
-
-    grid = lambda meta: (
-        triton.cdiv(meta["M"], meta["TILE_M"]),
-        triton.cdiv(meta["N"], meta["TILE_N"]),
-        batch,
-    )
-    with torch_device_fn.device(A.device):
-        baddbmm_kernel[grid](
-            A,
-            B,
-            out,
-            bbias,
-            alpha,
-            beta,
-            M,
-            N,
-            K,
-            bias_batch_stride=bias_batch_stride,
-            bias_M_stride=bias_M_stride,
-            bias_N_stride=bias_N_stride,
-        )
-
-
 class BaddbmmFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, bias, A, B, beta, alpha):
-        logger.debug("GEMS BADDBMM FORWARD")
+        logging.debug("GEMS BADDBMM FORWARD")
 
         ctx.save_for_backward(A, B, bias)
         ctx.alpha = alpha
@@ -181,13 +138,40 @@ class BaddbmmFunction(torch.autograd.Function):
 
         batch, M, K = A.shape
         _, _, N = B.shape
+        A = A.contiguous()
+        B = B.contiguous()
         out = torch.empty((batch, M, N), dtype=A.dtype, device=A.device)
-        _baddbmm_launch(bias, A, B, beta, alpha, out)
+
+        bbias = torch.broadcast_to(bias, (batch, M, N))
+        bias_batch_stride = bbias.stride(0)
+        bias_M_stride = bbias.stride(1)
+        bias_N_stride = bbias.stride(-1)
+
+        grid = lambda meta: (
+            triton.cdiv(meta["M"], meta["TILE_M"]),
+            triton.cdiv(meta["N"], meta["TILE_N"]),
+            batch,
+        )
+        with torch_device_fn.device(A.device):
+            baddbmm_kernel[grid](
+                A,
+                B,
+                out,
+                bbias,
+                alpha,
+                beta,
+                M,
+                N,
+                K,
+                bias_batch_stride=bias_batch_stride,
+                bias_M_stride=bias_M_stride,
+                bias_N_stride=bias_N_stride,
+            )
         return out
 
     @staticmethod
     def backward(ctx, grad_output):
-        logger.debug("GEMS BADDBMM BACKWARD")
+        logging.debug("GEMS BADDBMM BACKWARD")
         A, B, bias = ctx.saved_tensors
 
         grad_A = None
@@ -243,29 +227,5 @@ def compute_B_grad(A, d_output, alpha):
     return grad_B
 
 
-def baddbmm_out(bias, A, B, *, beta=1.0, alpha=1.0, out):
-    logger.debug("GEMS BADDBMM_OUT")
-    batch, M, K = A.shape
-    _, _, N = B.shape
-    assert (
-        out.shape == (batch, M, N) and out.dtype == A.dtype
-    ), "Incompatible output shape or dtype for baddbmm.out"
-    _baddbmm_launch(
-        bias.contiguous(),
-        A.contiguous(),
-        B.contiguous(),
-        beta,
-        alpha,
-        out,
-    )
-    return out
-
-
 def baddbmm(bias, A, B, beta=1.0, alpha=1.0):
-    return BaddbmmFunction.apply(
-        bias.contiguous(),
-        A.contiguous(),
-        B.contiguous(),
-        beta,
-        alpha,
-    )
+    return BaddbmmFunction.apply(bias, A.contiguous(), B.contiguous(), beta, alpha)

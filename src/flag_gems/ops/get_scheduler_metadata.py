@@ -6,8 +6,6 @@ import torch
 import triton
 import triton.language as tl
 
-from flag_gems.utils.device_info import get_device_capability, get_device_info
-
 logger = logging.getLogger(__name__)
 
 
@@ -157,8 +155,8 @@ def get_optimal_block_mn(
     varlen_and_split=False,
     append_kv=False,
 ):
-    major, minor = get_device_capability()
-    arch = major * 10 + minor
+    arch_cap = torch.cuda.get_device_capability(device)
+    arch = arch_cap[0] * 10 + arch_cap[1]
 
     if arch >= 90:
         paged_kv_non_TMA = bool(paged_kv and (not pagedkv_tma))
@@ -591,7 +589,6 @@ def get_scheduler_metadata(
     pack_gqa: Optional[bool] = None,
     sm_margin: int = 0,
 ) -> torch.Tensor:
-    logger.debug("GEMS Get Scheduler Metadata")
     device = seqused_k.device
     dtype = torch.int32
 
@@ -630,9 +627,9 @@ def get_scheduler_metadata(
         effective_window_left >= 0 or effective_window_right >= 0
     ) and not final_is_causal
 
-    major, minor = get_device_capability()
-    arch = major * 10 + minor
-    num_sm = get_device_info().sm_count - sm_margin
+    arch_cap = torch.cuda.get_device_capability(device)
+    arch = arch_cap[0] * 10 + arch_cap[1]
+    num_sm = torch.cuda.get_device_properties(device).multi_processor_count - sm_margin
 
     softcap = 1.0 if has_softcap else 0.0
 

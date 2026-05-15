@@ -13,11 +13,10 @@ logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
 )
 @triton.jit
 def elu_forward_kernel(x, alpha, scale, input_scale):
-    x_fp32 = x.to(tl.float32)
     return tl.where(
-        x_fp32 > 0,
-        scale * input_scale * x_fp32,
-        scale * alpha * (tl.exp(x_fp32 * input_scale) - 1),
+        x.to(tl.float32) > 0,
+        scale * input_scale * x.to(tl.float32),
+        scale * alpha * (tl.exp(x.to(tl.float32) * input_scale) - 1),
     )
 
 
@@ -34,17 +33,17 @@ def elu_backward_kernel(grad_output, x, alpha, scale, input_scale):
 
 
 def elu(A, alpha=1.0, scale=1.0, input_scale=1.0):
-    logger.debug("GEMS_KUNLUNXIN ELU")
+    logger.debug("GEMS ELU")
     return elu_forward_kernel(A, alpha, scale, input_scale)
 
 
 def elu_(A, alpha=1.0, scale=1.0, input_scale=1.0):
-    logger.debug("GEMS_KUNLUNXIN ELU_")
+    logger.debug("GEMS ELU_")
     return elu_forward_kernel(A, alpha, scale, input_scale, out0=A)
 
 
 def elu_backward(grad_output, alpha, scale, input_scale, is_result, self_or_result):
-    logger.debug("GEMS_KUNLUNXIN ELU BACKWARD")
+    logger.debug("GEMS ELU BACKWARD")
     grad_input = elu_backward_kernel(
         grad_output, self_or_result, alpha, scale, input_scale
     )

@@ -71,7 +71,7 @@ def generate_imports(code: IndentedBuffer) -> IndentedBuffer:
     code.newline()
     code.writeline("from flag_gems.utils.libentry import libentry")
     code.writeline("from flag_gems.runtime import torch_device_fn")
-    code.writeline("from flag_gems.utils import triton_lang_extension as ext")
+    code.writeline("from flag_gems.utils import triton_lang_extension as tle")
     code.writeline("from flag_gems.utils.type_utils import type_promotion")
     code.newline()
     code.newline()
@@ -282,7 +282,7 @@ def generate_pad_kernel(
     code.writeline("):")
 
     with code.indent():
-        code.writeline("pid = ext.program_id(0)")
+        code.writeline("pid = tle.program_id(0)")
         code.writeline("block_offset = pid * BLOCK_SIZE")
         code.writeline("offset = block_offset + tl.arange(0, BLOCK_SIZE)")
         code.newline()
@@ -298,12 +298,12 @@ def generate_pad_kernel(
         code.writeline("if_pad_true_mask = tl.full((BLOCK_SIZE, ), 1, dtype=tl.int32)")
 
         code.writeline(
-            "cond = ((dst_index_0 >= valid_dim0_start) & (dst_index_0 < valid_dim0_end))"
+            "cond = (dst_index_0 >= valid_dim0_start and dst_index_0 < valid_dim0_end) "
         )
 
         for i in range(1, rank):
             code.writeline(
-                f"cond &= ((dst_index_{i} >= valid_dim{i}_start) & (dst_index_{i} < valid_dim{i}_end))"
+                f"cond &= (dst_index_{i} >= valid_dim{i}_start and dst_index_{i} < valid_dim{i}_end)"
             )
 
         code.writeline(
@@ -371,7 +371,7 @@ def generate_pad_kernel(
         code.writeline("if IS_CONSTANT: ")
         with code.indent():
             code.writeline(
-                "x_val = tl.load(in0_ptr + src_offset, mask=((if_pad == 0) & load_cond), other=value)"
+                "x_val = tl.load(in0_ptr + src_offset, mask=(not if_pad) and load_cond, other=value)"
             )
         code.writeline("else: ")
         with code.indent():
@@ -467,21 +467,31 @@ def pad(self, pad, mode="constant", value=None):
     if value is None:
         value = 0.0
 
-    pad_pairs = len(pad) // 2
-
     if mode == "reflect":
-        for i in range(pad_pairs):
+        ndim //= 2
+        assert (
+            len(pad) == 2 * ndim
+        ), f"padding size is expected to be {2 * ndim}, but got {len(pad)}"
+
+        for i in range(ndim):
             pad_l, pad_r = pad[2 * i], pad[2 * i + 1]
-            input_size = self.shape[ndim - 1 - i]
+            input_l, input_r = (
+                self.shape[ndim - (2 * i + 1) - 1],
+                self.shape[ndim - (2 * i + 1)],
+            )
             assert (
-                pad_l < input_size and pad_r < input_size
+                pad_l < input_l and pad_r < input_r
             ), f"padding size should be less than the corresponding input dimension, \
                  but got padding size: {pad_l}, {pad_r}, input size: {self.shape}"
 
     if mode == "circular":
-        for i in range(pad_pairs):
+        ndim //= 2
+        assert (
+            len(pad) == 2 * ndim
+        ), f"padding size is expected to be {2 * ndim}, but got {len(pad)}"
+        for i in range(ndim):
             pad_l, pad_r = pad[2 * i], pad[2 * i + 1]
-            input_size = self.shape[ndim - 1 - i]
+            input_size = self.shape[ndim - i - 1]
             assert (
                 pad_l <= input_size and pad_r <= input_size
             ), "Padding value causes wrapping around more than once."
@@ -490,5 +500,5 @@ def pad(self, pad, mode="constant", value=None):
     return out
 
 
-def constant_pad_nd(self, pad_list, value=0):
-    return pad(self, pad_list, mode="constant", value=value)
+def constant_pad_nd(self, pad, value=0):
+    return pad(self, pad, mode="constant", value=value)

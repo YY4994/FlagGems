@@ -4,35 +4,29 @@ import torch
 import triton
 import triton.language as tl
 
+# from flag_gems import runtime
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import broadcastable_to, libentry
-from flag_gems.utils import triton_lang_extension as ext
+from flag_gems.utils import triton_lang_extension as tle
 
-logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
+logger = logging.getLogger(__name__)
 
 
 def heur_block_n(args):
-    N = args.get("N", 0)
-    # Use smaller BLOCK_N for more parallelism
-    if N <= 64:
-        return triton.next_power_of_2(N)
-    elif N <= 256:
-        return 64
-    elif N <= 1024:
-        return 128
-    else:
-        return 256
+    return triton.next_power_of_2(triton.cdiv(args["N"], 12))
 
 
 def heur_block_m(args):
     import builtins
 
-    M = args.get("M", 0)
-    # Larger BLOCK_M for better memory coalescing
-    return builtins.min(triton.next_power_of_2(M), 4096)
+    return builtins.min(triton.next_power_of_2(args["M"]), 4096)
 
 
 @libentry()
+# @triton.autotune(
+#     configs=runtime.get_tuned_config("mv"),
+#     key=["M", "N"],
+# )
 @triton.heuristics(
     {
         "BLOCK_N": heur_block_n,
@@ -45,19 +39,19 @@ def addmv_kernel(
     B,
     Inp,
     Out,
-    N: tl.constexpr,
-    M: tl.constexpr,
+    N,
+    M,
     alpha,
     beta,
-    stride_an: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_bm: tl.constexpr,
-    stride_in: tl.constexpr,
-    stride_outn: tl.constexpr,
+    stride_an,
+    stride_am,
+    stride_bm,
+    stride_in,
+    stride_outn,
     BLOCK_N: tl.constexpr,
     BLOCK_M: tl.constexpr,
 ):
-    pid = ext.program_id(0)
+    pid = tle.program_id(0)
     offset_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)[:, None]
     offset_m = tl.arange(0, BLOCK_M)[None, :]
     n_mask = offset_n < N
@@ -81,7 +75,7 @@ def addmv_kernel(
 
 
 def addmv(self, mat, vec, *, beta=1, alpha=1):
-    logger.debug("GEMS_KUNLUNXIN ADDMV")
+    logger.debug("GEMS ADDMV")
     assert mat.shape[1] == vec.shape[0], "incompatible dimensions"
     assert broadcastable_to(self.shape, (mat.shape[0],)), "Incompatible self shape"
     N, M = mat.shape
@@ -108,7 +102,7 @@ def addmv(self, mat, vec, *, beta=1, alpha=1):
 
 
 def addmv_out(self, mat, vec, *, beta=1, alpha=1, out=None):
-    logger.debug("GEMS_KUNLUNXIN ADDMV OUT")
+    logger.debug("GEMS ADDMV OUT")
     assert mat.shape[1] == vec.shape[0], "incompatible dimensions"
     assert broadcastable_to(self.shape, (mat.shape[0],)), "Incompatible self shape"
     N, M = mat.shape

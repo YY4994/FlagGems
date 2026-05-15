@@ -8,9 +8,9 @@ import triton.language as tl
 from flag_gems import runtime
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
-from flag_gems.utils import triton_lang_extension as ext
+from flag_gems.utils import triton_lang_extension as tle
 
-logger = logging.getLogger("flag_gems." + __name__)
+logger = logging.getLogger(__name__)
 
 
 @libentry()
@@ -24,25 +24,7 @@ logger = logging.getLogger("flag_gems." + __name__)
         "UPGRADE": lambda args: math.ceil(
             (args["M"] * args["N"]) / (args["BLOCK_M"] * args["BLOCK_N"])
         ).bit_length()
-        > 31,
-    }
-)
-@triton.heuristics(
-    {
-        "UPGRADE_A_OFFS": lambda args: math.ceil(args["M"] * args["K"]).bit_length()
-        > 31,
-    }
-)
-@triton.heuristics(
-    {
-        "UPGRADE_B_OFFS": lambda args: math.ceil(args["K"] * args["N"]).bit_length()
-        > 31,
-    }
-)
-@triton.heuristics(
-    {
-        "UPGRADE_C_OFFS": lambda args: math.ceil(args["M"] * args["N"]).bit_length()
-        > 31,
+        > 32,
     }
 )
 @triton.jit
@@ -67,14 +49,11 @@ def mm_kernel(
     SPLIT_K: tl.constexpr,
     EVEN_K: tl.constexpr,
     UPGRADE: tl.constexpr,
-    UPGRADE_A_OFFS: tl.constexpr,
-    UPGRADE_B_OFFS: tl.constexpr,
-    UPGRADE_C_OFFS: tl.constexpr,
 ):
     # matrix multiplication
     if UPGRADE:
-        pid = ext.program_id(0)
-        pid_z = ext.program_id(1)
+        pid = tle.program_id(0)
+        pid_z = tle.program_id(1)
     else:
         pid = tl.program_id(0)
         pid_z = tl.program_id(1)
@@ -87,19 +66,10 @@ def mm_kernel(
     pid_m = group_id * GROUP_M + (pid % group_size)
     pid_n = (pid % width) // (group_size)
     # do matrix multiplication
-    if UPGRADE_A_OFFS:
-        rm = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
-        ram = (tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)).to(tl.int64)
-    else:
-        rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
-    if UPGRADE_B_OFFS:
-        rn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
-        rbn = (tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)).to(tl.int64)
-    else:
-        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
-
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
+    rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
     rk = pid_z * BLOCK_K + tl.arange(0, BLOCK_K)
     # pointers
     A = A + (ram[:, None] * stride_am + rk[None, :] * stride_ak)
@@ -122,14 +92,9 @@ def mm_kernel(
         B += BLOCK_K * SPLIT_K * stride_bk
     acc = acc.to(C.dtype.element_ty)
     # rematerialize rm and rn to save registers
-    if UPGRADE_C_OFFS:
-        rm = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
-        rn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
-        C = C + (rm[:, None] * stride_cm + rn[None, :] * stride_cn).to(tl.int64)
-    else:
-        rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        C = C + (rm[:, None] * stride_cm + rn[None, :] * stride_cn)
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    C = C + (rm[:, None] * stride_cm + rn[None, :] * stride_cn)
     mask = (rm < M)[:, None] & (rn < N)[None, :]
     # handles write-back with reduction-splitting
     if SPLIT_K == 1:
@@ -171,15 +136,6 @@ def mm(a, b):
     c_dtype = get_higher_dtype(a.dtype, b.dtype)
     c = torch.empty((M, N), device=device, dtype=c_dtype)
     dot_out_dtype = tl.float32
-    logger.debug(
-        "METAX GEMS MM, [mm scenario]: general, [shape info]: [-, %s, %s, %s](batch, M, N, K), "
-        "[A column-major]: %s, [B column-major]: %s",
-        M,
-        N,
-        K,
-        a.stride(0) == 1,
-        b.stride(0) == 1,
-    )
     # launch kernel
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
@@ -219,15 +175,6 @@ def mm_out(a, b, *, out):
     # allocates output
     c = out
     dot_out_dtype = tl.float32
-    logger.debug(
-        "METAX GEMS MM, [mm scenario]: general, [shape info]: [-, %s, %s, %s](batch, M, N, K), "
-        "[A column-major]: %s, [B column-major]: %s",
-        M,
-        N,
-        K,
-        a.stride(0) == 1,
-        b.stride(0) == 1,
-    )
     # launch kernel
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),

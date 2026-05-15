@@ -16,8 +16,6 @@ config_ = CodeGenConfig(
     True,
     prefer_1d_tile=True,
     isCloseMemoryAsync=False,
-    kunlunAutoGrid=True,
-    unroll_num=8,
 )
 
 

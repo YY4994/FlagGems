@@ -7,7 +7,7 @@ import triton.language as tl
 
 from flag_gems import runtime
 from flag_gems.utils import libentry
-from flag_gems.utils import triton_lang_extension as ext
+from flag_gems.utils import triton_lang_extension as tle
 
 logger = logging.getLogger(f'flag_gems.runtime._ascend.ops.{__name__.split(".")[-1]}')
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(f'flag_gems.runtime._ascend.ops.{__name__.split(".")[
 @libentry()
 @triton.jit
 def arange_func(y_ptr, start, end, step, size, BLOCK_SIZE: tl.constexpr):
-    pid = ext.program_id(0)
+    pid = tle.program_id(0)
     y_ptr += pid * BLOCK_SIZE
     step_offset = pid * BLOCK_SIZE * step
 

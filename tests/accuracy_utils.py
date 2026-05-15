@@ -66,15 +66,6 @@ SPECIAL_SHAPES = (
     if QUICK_MODE
     else [(1,), (1024, 1024), (20, 320, 15), (16, 128, 64, 1280), (16, 7, 57, 32, 29)]
 )
-
-FP8_QUANT_SHAPES = {
-    "DTYPES": [torch.bfloat16],
-    "NUM_TOKENS": [7] if QUICK_MODE else [7, 83, 2048],
-    "D": [512] if QUICK_MODE else [512, 4096, 5120, 13824],
-    "GROUP_SIZE": [512] if QUICK_MODE else [64, 128, 256, 512],
-    "SEEDS": [0],
-}
-
 DISTRIBUTION_SHAPES = [(20, 320, 15)]
 REDUCTION_SHAPES = [(2, 32)] if QUICK_MODE else [(1, 2), (4096, 256), (200, 40999, 3)]
 REDUCTION_SMALL_SHAPES = (
@@ -130,36 +121,6 @@ UPSAMPLE_SHAPES = [
     (3, 7, 1023, 1025),
 ]
 
-# 1D upsample uses (N, C, W) shapes derived from the 2D cases above.
-UPSAMPLE_SHAPES_1D = [s[:3] for s in UPSAMPLE_SHAPES]
-
-UPSAMPLE_SHAPES_3D = [
-    (4, 8, 32, 32, 32),
-    (3, 5, 17, 19, 23),
-    (2, 16, 8, 64, 64),
-    (12, 24, 16, 16, 16),
-    (1, 2, 63, 65, 67),
-]
-
-SWIGLU_SPECIAL_SHAPES = (
-    [(2, 19, 8)]
-    if QUICK_MODE
-    else [
-        (2,),
-        (64,),
-        (32, 64),
-        (256, 512),
-        (1, 128),
-        (8, 16, 32),
-        (16, 32, 64),
-        (20, 320, 16),
-        (4, 8, 16, 32),
-        (8, 16, 32, 64),
-        (10,),
-        (20, 30),
-    ]
-)
-
 KRON_SHAPES = [
     [(), (2, 3)],
     [(2, 3), ()],
@@ -199,7 +160,6 @@ FLOAT_DTYPES = (
     if bf16_is_supported
     else PRIMARY_FLOAT_DTYPES
 )
-
 ALL_FLOAT_DTYPES = FLOAT_DTYPES + [torch.float64] if fp64_is_supported else FLOAT_DTYPES
 INT_DTYPES = [torch.int16, torch.int32]
 ALL_INT_DTYPES = INT_DTYPES + [torch.int64] if int64_is_supported else INT_DTYPES
@@ -220,16 +180,14 @@ def to_reference(inp, upcast=False):
         ref_inp = ref_inp.to("cpu")
     if upcast:
         if ref_inp.is_complex():
-            ref_inp = ref_inp.to(
-                torch.complex128 if fp64_is_supported else torch.complex64
-            )
+            ref_inp = ref_inp.to(torch.complex128)
         else:
-            ref_inp = ref_inp.to(torch.float64 if fp64_is_supported else torch.float32)
+            ref_inp = ref_inp.to(torch.float64)
     return ref_inp
 
 
 def to_cpu(res, ref):
-    if TO_CPU and isinstance(res, torch.Tensor) and isinstance(ref, torch.Tensor):
+    if TO_CPU:
         res = res.to("cpu")
         assert ref.device == torch.device("cpu")
     return res

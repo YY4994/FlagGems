@@ -42,7 +42,6 @@ def mean_kernel_1(
 
 def mean(inp, *, dtype=None):
     logger.debug("GEMS_CAMBRICON MEAN")
-    inp = inp.contiguous()
     M = inp.numel()
     if dtype is None:
         dtype = inp.dtype

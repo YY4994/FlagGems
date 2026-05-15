@@ -11,7 +11,6 @@ from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
 
 from ..utils import MAX_NRAM_SIZE, TOTAL_CORE_NUM
-from .zeros import zero_
 
 logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
 MAX_N = 16384
@@ -381,13 +380,7 @@ def softmax_kernel_inner_k_partial_stats(
         ).to(tl.float32)
 
         tile_max = tl.max(tile, axis=1)
-        all_neg_inf = tile_max == -float("inf")
-
-        tile_sum = tl.where(
-            all_neg_inf,
-            0.0,
-            tl.sum(tl.exp(tile - tile_max[:, None]), axis=1),
-        )
+        tile_sum = tl.sum(tl.exp(tile - tile_max[:, None]), axis=1)
 
         tl.store(max_buf_ptr + offs_m * T + tile_id, tile_max, mask=(offs_m < M))
         tl.store(sum_buf_ptr + offs_m * T + tile_id, tile_sum, mask=(offs_m < M))
@@ -466,13 +459,7 @@ def softmax_kernel_inner_k_write_softmax(
             other=-float("inf"),
         ).to(tl.float32)
 
-        valid = gsum[:, None] > 0
-
-        out = tl.where(
-            valid,
-            tl.exp(tile - gmax[:, None]) / gsum[:, None],
-            0.0,
-        )
+        out = tl.exp(tile - gmax[:, None]) / gsum[:, None]
 
         tl.store(y_ptr + offs_m[:, None] * N + offs_n[None, :], out, mask=mask)
 
@@ -749,15 +736,6 @@ def softmax(self, dim, half_to_float=False):
     logger.debug("GEMS_CAMBRICON SOFTMAX")
 
     assert dim >= -self.ndim and dim < self.ndim, "Invalid dim"
-
-    # special handling for dim = 0 and empty tensor
-    if self.numel() == 0:
-        # empty tensor, return the same shape with 1's
-        out_shape = list(self.shape)
-        out = torch.empty(out_shape, dtype=self.dtype, device=self.device)
-        zero_(out)
-        return out
-
     dim = dim % self.ndim
     M = 1
     N = self.shape[dim]

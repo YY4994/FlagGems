@@ -7,7 +7,7 @@ import triton.language as tl
 # from flag_gems import runtime
 from flag_gems.utils import dim_compress
 
-logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
+logger = logging.getLogger(__name__)
 
 
 @triton.jit

@@ -5,7 +5,6 @@ import triton
 import triton.language as tl
 
 from flag_gems.runtime import device, torch_device_fn
-from flag_gems.utils import libentry, libtuner
 from flag_gems.utils.shape_utils import volume
 
 from ..utils import TOTAL_CORE_NUM
@@ -14,8 +13,7 @@ logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
 device_ = device
 
 
-@libentry()
-@libtuner(
+@triton.autotune(
     configs=[
         triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_stages=1, num_warps=1),
         triton.Config(kwargs={"BLOCK_SIZE": 4096}, num_stages=1, num_warps=1),
@@ -23,7 +21,6 @@ device_ = device
         triton.Config(kwargs={"BLOCK_SIZE": 65536}, num_stages=1, num_warps=1),
     ],
     key=["n_elements"],
-    strategy=["align32"],
 )
 @triton.jit
 def ones_kernel(

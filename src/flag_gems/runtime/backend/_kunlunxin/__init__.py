@@ -8,12 +8,12 @@ vendor_info = VendorInfoBase(
 )
 
 CUSTOMIZED_UNUSED_OPS = (
-    "cummin",
     "cumsum",
-    "randperm",
-    "sort",
-    "topk",
     "unique",
+    "randperm",
+    "cummin",
+    "topk",
+    "sort",
 )
 
 

@@ -23,14 +23,14 @@ from typing import (
     Tuple,
     Type,
     Union,
-    overload,
 )
 
+import torch
 import triton
 
 from flag_gems import runtime
 from flag_gems.runtime import torch_device_fn
-from flag_gems.runtime.backend import _state
+from flag_gems.runtime.backend import vendor_module
 from flag_gems.utils.code_cache import config_cache_dir
 from flag_gems.utils.models import PersistantModel, SQLPersistantModel
 
@@ -157,16 +157,12 @@ class LibCache(object):
     def __init__(self, db_url: Optional[str] = None):
         self.global_cache: Dict = {}
         self.volumn: Dict = {}
-        device_name = _state.vendor_module.vendor_info.device_name
         if db_url is None:
-            try:
-                device_name: str = torch_device_fn.get_device_name().replace(" ", "_")
-            except AttributeError:
-                device_name: str = device_name
+            device_name: str = torch.cuda.get_device_name().replace(" ", "_")
             cache_file_name: str = (
                 f"TunedConfig_{device_name}_triton_{major_version}_{minor_version}.db"
-                if device_name == "nvidia"
-                else f"TunedConfig_{device_name}_triton_{major_version}_{minor_version}.db"
+                if vendor_module.vendor_info.vendor_name == "nvidia"
+                else f"TunedConfig_{vendor_module.vendor_info.vendor_name}_triton_{major_version}_{minor_version}.db"
             )
             cache_path: Path = config_cache_dir() / cache_file_name
             self.db_url: str = f"sqlite:///{cache_path}"
@@ -177,14 +173,6 @@ class LibCache(object):
             Tuple[str, Tuple[Union[int, float, str], ...]], BenchmarkCache
         ] = {}
         self.model: PersistantModel = SQLPersistantModel(self.db_url)
-
-    @overload
-    def __getitem__(self, key: str) -> ConfigCache:
-        ...
-
-    @overload
-    def __getitem__(self, key: Tuple[Union[int, float, str]]) -> BenchmarkCache:
-        ...
 
     def __getitem__(
         self, key: Union[str, Tuple[Union[int, float, str], ...]]
@@ -418,8 +406,6 @@ class LibTuner(triton.runtime.Autotuner):
         return decorator
 
     def run(self, *args, **kwargs):
-        if hasattr(self, "seen_tuned_metas"):
-            self.seen_tuned_metas = {}  # flagtree aabs: deduplicate tuned meta
         # `arg_names` corresponds to the arguments of the `JITFunction`'s signature,
         # so please make sure the orders of `arg_names` and `args` match.
         self.nargs = dict(zip(self.arg_names, args))
@@ -459,13 +445,6 @@ class LibTuner(triton.runtime.Autotuner):
                 self.pre_hook(full_nargs, reset_only=True)
                 self.configs_timings = timings
             config = self.cache[key]
-            if config.pre_hook is None:
-                cached_kwargs = config.all_kwargs()
-                for original_config in self.configs:
-                    if original_config.all_kwargs() == cached_kwargs:
-                        # Use the original config which has the pre_hook
-                        config = original_config
-                        break
         else:
             config = self.configs[0]
         self.best_config = config
@@ -474,13 +453,8 @@ class LibTuner(triton.runtime.Autotuner):
                 f"Triton autotuning for function {self.base_fn.__name__} finished after "
                 f"{self.bench_time:.2f}s; key info: {key}, best config selected: {self.best_config};"
             )
-        full_nargs = {**self.nargs, **kwargs, **config.all_kwargs()}
-        if (
-            hasattr(self, "shared_config_pre_hook")
-            and self.shared_config_pre_hook is not None
-        ):
-            self.shared_config_pre_hook(full_nargs)
-        elif config.pre_hook is not None:
+        if config.pre_hook is not None:
+            full_nargs = {**self.nargs, **kwargs, **config.all_kwargs()}
             config.pre_hook(full_nargs)
         ret = self.fn.run(
             *args,
@@ -504,10 +478,6 @@ def log2_strategy(key: Union[int, float]) -> float:
 
 @LibTuner.register_strategy("align32")
 def align32_strategy(key: Union[int, float]) -> int:
-    if key == 0:
-        return 0
-    if key < 32:
-        return 2 ** math.ceil(math.log2(key))
     return math.ceil(key / 32) * 32
 
 
@@ -678,30 +648,16 @@ class LibEntry(triton.KernelInterface):
         k_args = OrderedDict()
         param_names = list(self.signature.parameters.keys())
         for i, arg in enumerate(args):
-            hashable_arg = arg
-            if (
-                hasattr(arg, "__class__")
-                and arg.__class__.__name__ == "TensorDescriptor"
-            ):
-                # Create a hashable representation of TensorDescriptor
-                hashable_arg = (
-                    "TensorDescriptor",
-                    tuple(arg.shape) if hasattr(arg, "shape") else None,
-                    tuple(arg.strides) if hasattr(arg, "strides") else None,
-                    tuple(arg.block_shape) if hasattr(arg, "block_shape") else None,
-                    arg.padding if hasattr(arg, "padding") else None,
-                    # Add other relevant attributes
-                )
             if i in self.specialize_indices:
                 k_args[param_names[i]] = arg
-                spec_args.append(hashable_arg)
+                spec_args.append(arg)
             elif i in self.do_not_specialize_indices:
                 k_args[param_names[i]] = arg
-                dns_args.append(hashable_arg)
+                dns_args.append(arg)
             else:
-                if major_version == 3 and 3 <= minor_version <= 6:
+                if major_version == 3 and 3 <= minor_version <= 5:
                     k_args[param_names[i]] = arg
-                const_args.append(hashable_arg)
+                const_args.append(arg)
         for p in self.jit_function.params[len(args) :]:
             if p.name in kwargs:
                 val = kwargs[p.name]
@@ -712,7 +668,7 @@ class LibEntry(triton.KernelInterface):
 
             if p.is_constexpr:
                 const_args.append(val)
-                if major_version == 3 and 3 <= minor_version <= 6:
+                if major_version == 3 and 3 <= minor_version <= 5:
                     k_args[p.name] = val
             elif p.do_not_specialize:
                 dns_args.append(val)
@@ -736,7 +692,6 @@ class LibEntry(triton.KernelInterface):
                 constexprs = {}
                 tune_constexprs = {}
                 heur_constexprs = {}
-                launch_pre_hooks = []
                 while not isinstance(fn, triton.runtime.JITFunction):
                     if isinstance(fn, triton.runtime.Autotuner):
                         config = fn.best_config
@@ -745,10 +700,6 @@ class LibEntry(triton.KernelInterface):
                         constexprs["num_ctas"] = config.num_ctas
                         constexprs = {**constexprs, **config.kwargs}
                         tune_constexprs = {**tune_constexprs, **config.kwargs}
-                        if config.pre_hook is not None:
-                            launch_pre_hooks.append(
-                                (config.pre_hook, config.all_kwargs())
-                            )
                     elif isinstance(fn, triton.runtime.Heuristics):
                         for v, heur in fn.values.items():
                             heur_constexprs[v] = heur(
@@ -774,17 +725,10 @@ class LibEntry(triton.KernelInterface):
                     constexprs,
                     tune_constexprs,
                     heur_constexprs,
-                    tuple(launch_pre_hooks),
                 )
             return kernel, constexprs
 
-        (
-            kernel,
-            constexprs,
-            tune_constexprs,
-            heur_constexprs,
-            launch_pre_hooks,
-        ) = cache[entry_key]
+        kernel, constexprs, tune_constexprs, heur_constexprs = cache[entry_key]
 
         if callable(grid):
             # collect all arguments to the grid fn，ie:
@@ -796,12 +740,7 @@ class LibEntry(triton.KernelInterface):
             grid = grid(meta)
         grid = grid + (1, 1)
 
-        if launch_pre_hooks:
-            hook_nargs = {**dict(zip(self.arg_names, args)), **kwargs}
-            for pre_hook, hook_kwargs in launch_pre_hooks:
-                pre_hook({**hook_nargs, **hook_kwargs})
-
-        if major_version == 3 and 3 <= minor_version <= 6:
+        if major_version == 3 and 3 <= minor_version <= 5:
             all_args = []
             missing_keys = []
             for key in list(self.signature.parameters.keys()):

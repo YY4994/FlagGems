@@ -7,7 +7,7 @@ import triton.language as tl
 from flag_gems import runtime
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import broadcastable, libentry
-from flag_gems.utils import triton_lang_extension as ext
+from flag_gems.utils import triton_lang_extension as tle
 
 logger = logging.getLogger(f'flag_gems.runtime._ascend.ops.{__name__.split(".")[-1]}')
 
@@ -23,7 +23,7 @@ def masked_select_kernel(
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = ext.program_id(axis=0)
+    pid = tle.program_id(axis=0)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
 
@@ -31,7 +31,7 @@ def masked_select_kernel(
     select_mask = tl.load(select_mask_ptr + offsets, mask=mask, other=0.0).to(tl.int1)
     out_offset = tl.load(prefix_sum_ptr + offsets, mask=mask, other=0.0) - 1
 
-    tl.store(out_ptr + out_offset, inp, mask=(select_mask & mask))
+    tl.store(out_ptr + out_offset, inp, mask=(select_mask and mask))
 
 
 def masked_select(inp, mask):

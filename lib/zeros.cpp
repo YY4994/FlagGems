@@ -2,7 +2,7 @@
 #include "flag_gems/utils.h"
 
 #include <iostream>
-#include "flag_gems/backend_utils.h"
+#include "c10/cuda/CUDAStream.h"
 #include "triton_jit/triton_jit_function.h"
 
 namespace flag_gems {
@@ -18,11 +18,12 @@ at::Tensor zeros(at::IntArrayRef size,
     n_elements *= dim;
   }
 
-  auto options = at::TensorOptions()
-                     .dtype(dtype.value_or(at::typeMetaToScalarType(at::get_default_dtype())))
-                     .layout(layout.value_or(at::kStrided))
-                     .device(device.value_or(backend::getDefaultDevice()))
-                     .pinned_memory(pin_memory.value_or(false));
+  auto options =
+      at::TensorOptions()
+          .dtype(dtype.value_or(at::typeMetaToScalarType(at::get_default_dtype())))
+          .layout(layout.value_or(at::kStrided))
+          .device(device.value_or(torch::cuda::is_available() ? at::Device(at::kCUDA) : at::Device(at::kCPU)))
+          .pinned_memory(pin_memory.value_or(false));
 
   TORCH_CHECK(n_elements >= 0, "Total elements must be non-negative");
 
@@ -42,8 +43,8 @@ at::Tensor zeros(at::IntArrayRef size,
       TritonJITFunction::get_instance(std::string(utils::get_triton_src_path() / "zeros.py"), "zeros_kernel");
 
   c10::DeviceGuard guard(out.device());
-  backend::StreamType stream = backend::getCurrentStream();
-  backend::RawStreamType raw_stream = backend::getRawStream(stream);
+  c10::cuda::CUDAStream stream = c10::cuda::getCurrentCUDAStream();
+  CUstream raw_stream = static_cast<CUstream>(stream.stream());
 
   f(raw_stream,
     num_blocks,
