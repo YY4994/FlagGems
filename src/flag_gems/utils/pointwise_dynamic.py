@@ -466,7 +466,14 @@ class KernelGenerator:
         code.writeline("# loads")
         for i in range(schema.num_input_tensors()):
             strides = _tuple_content(tuple(f"in{i}_stride{j}" for j in range(ndim)))
-            order = _tuple_content(tuple(f"in{i}_stride_order{j}" for j in range(ndim)))
+            import flag_gems
+
+            if flag_gems.vendor_name == "spacemit":
+                order = _tuple_content(tuple(f"{ndim - j - 1}" for j in range(ndim)))
+            else:
+                order = _tuple_content(
+                    tuple(f"in{i}_stride_order{j}" for j in range(ndim))
+                )
             code.writeline(
                 f"in{i}_bptr = tl.make_block_ptr("
                 f"in{i}_ptr, ({shape}), ({strides}), ({offsets}), ({tile_sizes}), order=({order}))"
@@ -510,7 +517,7 @@ class KernelGenerator:
             )
 
     def gen_body_gsl_with_bptr(self, code):
-        code.writeline("num_ctas = tle.num_programs(0)")
+        code.writeline("num_ctas = ext.num_programs(0)")
         code.writeline("for j in range(0, tiles_per_cta):")
         with code.indent():
             code.writeline("tile_id = pid + j * num_ctas")
@@ -586,7 +593,7 @@ class KernelGenerator:
             )
 
     def gen_body_gsl_without_bptr(self, code):
-        code.writeline("num_ctas = tle.num_programs(0)")
+        code.writeline("num_ctas = ext.num_programs(0)")
         code.writeline("for j in range(0, tiles_per_cta):")
         with code.indent():
             code.writeline("tile_id = pid + j * num_ctas")
@@ -605,7 +612,7 @@ class KernelGenerator:
             return code
 
         with code.indent():
-            code.writeline("pid = tle.program_id(0)")
+            code.writeline("pid = ext.program_id(0)")
             self.gen_num_tiles(code)
             # monolitic kernel: one_tile_per_cta, it may requires a very large grid to compute
             code.writeline("if one_tile_per_cta: # monolitic kernel style")
@@ -631,7 +638,7 @@ class KernelGenerator:
             return code
 
         with code.indent():
-            code.writeline("pid = tle.program_id(0)")
+            code.writeline("pid = ext.program_id(0)")
             self.gen_num_tiles(code)
             # monolitic kernel: one_tile_per_cta, it may requires a very large grid to compute
             code.writeline("if one_tile_per_cta: # monolitic kernel style")
@@ -705,7 +712,7 @@ class KernelGenerator:
             )
 
     def gen_body_gsl_1d_tile(self, code):
-        code.writeline("num_ctas = tle.num_programs(0)")
+        code.writeline("num_ctas = ext.num_programs(0)")
         code.writeline("for j in range(0, tiles_per_cta):")
         with code.indent():
             code.writeline("tile_id = pid + j * num_ctas")
@@ -724,7 +731,7 @@ class KernelGenerator:
             return code
 
         with code.indent():
-            code.writeline("pid = tle.program_id(0)")
+            code.writeline("pid = ext.program_id(0)")
             # code.writeline("num_ctas = te.num_programs(0)")
             # monolitic kernel: one_tile_per_cta, it may requires a very large grid to compute
             code.writeline("if one_tile_per_cta: # monolitic kernel style")
@@ -824,9 +831,23 @@ class WrapperGenerator:
             with code.indent():
                 self.gen_return(code)
             max_tile_size = self.config.max_tile_size
+            # Check if all input and output dtypes are complex
+            all_complex = True
+            for i in range(self.fx.num_inputs()):
+                if self.fx.is_tensor(i):
+                    input_dtype = self.fx.input_type(i)
+                    if input_dtype is not None and not (
+                        input_dtype == torch.complex64
+                        or input_dtype == torch.complex128
+                    ):
+                        all_complex = False
+                        break
+            if all_complex:
+                # If all inputs are complex, set max_tile_size to half
+                max_tile_size = max_tile_size // 2
             major, _ = get_device_capability()
             if self.name.find("fill_scalar") != -1 and major >= 9:
-                code.writeline("tile_sizes = heuristics_for_tile_size(64, *shape)")
+                code.writeline("tile_sizes = tuple([64])")
             else:
                 code.writeline(
                     f"tile_sizes = heuristics_for_tile_size({max_tile_size}, *shape)"
@@ -860,7 +881,19 @@ class WrapperGenerator:
             with code.indent():
                 self.gen_return(code)
             max_tile_size = self.config.max_tile_size
-
+            # Check if all input and output dtypes are complex
+            all_complex = True
+            for i in range(self.fx.num_inputs()):
+                if self.fx.is_tensor(i):
+                    input_dtype = self.fx.input_type(i)
+                    if input_dtype is not None and not (
+                        input_dtype == torch.complex64
+                        or input_dtype == torch.complex128
+                    ):
+                        all_complex = False
+                        break
+            if all_complex:
+                max_tile_size = max_tile_size // 2
             major, _ = get_device_capability()
             if self.name.find("fill_scalar") != -1 and major >= 9:
                 code.writeline("tile_sizes = tuple([1024])")
@@ -1146,7 +1179,7 @@ class ModuleGenerator:
         code.writeline(")")
         code.writeline("from flag_gems.utils.tensor_wrapper import StridedBuffer")
         code.writeline("from flag_gems.utils.libentry import libentry")
-        code.writeline("from flag_gems.utils import triton_lang_extension as tle")
+        code.writeline("from flag_gems.utils import triton_lang_extension as ext")
         code.writeline("from flag_gems.runtime import torch_device_fn")
 
         # Generate extra imports and local JIT deps of the scalar function
